@@ -1,4 +1,4 @@
-import { App, Plugin, PluginSettingTab, Setting, Modal, Notice } from 'obsidian';
+import { App, Plugin, PluginSettingTab, Setting, Modal, Notice, MarkdownView, Editor, requestUrl } from 'obsidian';
 import { EditorView, Decoration, DecorationSet, ViewPlugin, ViewUpdate, WidgetType, hoverTooltip } from '@codemirror/view';
 
 interface MyPluginSettings {
@@ -17,14 +17,14 @@ export default class FatebookPlugin extends Plugin {
 	async onload() {
 		console.log('Loading Fatebook plugin...');
 		new Notice('Fatebook plugin loaded!');
-		
+
 		await this.loadSettings();
 
 		// Create a function to create the embed DOM element
 		const createEmbed = (questionId: string) => {
 			const dom = document.createElement('div');
 			dom.className = 'fatebook-embed';
-			
+
 			const iframe = document.createElement('iframe');
 			iframe.src = `https://fatebook.io/embed/q/${questionId}?compact=true&requireSignIn=false`;
 			iframe.width = '400';
@@ -32,12 +32,12 @@ export default class FatebookPlugin extends Plugin {
 			iframe.style.border = '1px solid rgba(255, 255, 255, 0.1)';
 			iframe.style.borderRadius = '4px';
 			iframe.style.display = 'block';
-			
+
 			// Handle load errors
 			iframe.onerror = () => {
 				console.error('Failed to load Fatebook embed');
 			};
-			
+
 			dom.appendChild(iframe);
 			return dom;
 		};
@@ -51,7 +51,7 @@ export default class FatebookPlugin extends Plugin {
 			while ((match = linkRegex.exec(line.text)) !== null) {
 				const from = line.from + match.index;
 				const to = from + match[0].length;
-				
+
 				if (pos >= from && pos <= to && match[2]) {
 					const idMatch = match[2].match(/--([^)]+)$/);
 					if (idMatch) {
@@ -73,7 +73,7 @@ export default class FatebookPlugin extends Plugin {
 		const hoverHandler = (event: MouseEvent) => {
 			const target = event.target as HTMLElement;
 			const href = target.getAttribute('href');
-			
+
 			if (href?.includes('fatebook.io/q/')) {
 				const idMatch = href.match(/--([^)]+)$/);
 				if (idMatch && !target.querySelector('.fatebook-embed')) {
@@ -98,6 +98,25 @@ export default class FatebookPlugin extends Plugin {
 			name: 'Create New Prediction',
 			callback: () => {
 				new PredictionModal(this.app, this).open();
+			}
+		});
+		// Add a command to resolve fatebook prediction
+		this.addCommand({
+			id: 'resolve-fatebook-prediction',
+			name: 'Resolve Prediction under Cursor',
+			editorCallback: (editor: Editor, view: MarkdownView) => {
+				const cursor = editor.getCursor();
+				const lineText = editor.getLine(cursor.line);
+
+				// Match the Fatebook URL format and capture the ID at the end
+				const match = lineText.match(/fatebook\.io\/q\/.*--([^)]+)/);
+
+				if (match && match[1]) {
+					const questionId = match[1];
+					new ResolveModal(this.app, this, questionId, editor, cursor.line).open();
+				} else {
+					new Notice('No Fatebook prediction found on the current line.');
+				}
 			}
 		});
 
@@ -131,7 +150,7 @@ export default class FatebookPlugin extends Plugin {
 			createUrl.searchParams.append('resolveBy', resolveBy);
 			createUrl.searchParams.append('forecast', forecast);
 			createUrl.searchParams.append('sharePublicly', 'yes');
-			
+
 			// Add tags to URL
 			tags.forEach(tag => {
 				createUrl.searchParams.append('tags', tag);
@@ -159,9 +178,16 @@ export default class FatebookPlugin extends Plugin {
 				const link = `https://fatebook.io/q/${formattedTitle}--${question.id}`;
 				const markdownLink = `[${question.title}](${link})`;
 
-				// Copy to clipboard
-				await navigator.clipboard.writeText(markdownLink);
-				new Notice('Prediction created and link copied to clipboard!');
+				const activeView = this.app.workspace.getActiveViewOfType(MarkdownView);
+
+				if (activeView) {
+					activeView.editor.replaceSelection(markdownLink + '\n');
+					new Notice('Prediction inserted into current note!');
+				} else {
+					// Fallback just in case you trigger the command without an active file
+					await navigator.clipboard.writeText(markdownLink);
+					new Notice('No active file found. Link copied to clipboard!');
+				}
 				return true;
 			}
 
@@ -173,12 +199,41 @@ export default class FatebookPlugin extends Plugin {
 			return false;
 		}
 	}
+	async resolvePrediction(questionId: string, resolution: string): Promise<boolean> {
+		try {
+			const response = await requestUrl({
+				url: 'https://fatebook.io/api/v0/resolveQuestion',
+				method: 'POST',
+				headers: {
+					'Content-Type': 'application/json'
+				},
+				body: JSON.stringify({
+					apiKey: this.settings.apiKey,
+					questionId: questionId,
+					resolution: resolution.toUpperCase(),
+					questionType: 'BINARY' // <-- This was the missing piece
+				})
+			});
+
+			return response.status === 200;
+		} catch (error: any) {
+			// Obsidian's requestUrl throws an error on non-200 responses
+			console.error('Resolution API Error:', error);
+
+			// Try to parse the specific error message from Fatebook if available
+			if (error.json) {
+				console.error('Fatebook Message:', error.json);
+			}
+
+			return false;
+		}
+	}
 
 	private makeRequest(url: string): Promise<string | null> {
 		return new Promise((resolve) => {
 			// @ts-ignore
 			const https = require('https');
-			
+
 			https.get(url, (resp: any) => {
 				let data = '';
 
@@ -211,9 +266,9 @@ class PredictionModal extends Modal {
 	}
 
 	onOpen() {
-		const {contentEl} = this;
+		const { contentEl } = this;
 		contentEl.empty();
-		contentEl.createEl('h2', {text: 'Create Fatebook Prediction'});
+		contentEl.createEl('h2', { text: 'Create Fatebook Prediction' });
 
 		const form = contentEl.createEl('form');
 		form.onsubmit = async (e) => {
@@ -316,7 +371,7 @@ class PredictionModal extends Modal {
 	}
 
 	onClose() {
-		const {contentEl} = this;
+		const { contentEl } = this;
 		contentEl.empty();
 	}
 }
@@ -330,7 +385,7 @@ class FatebookSettingTab extends PluginSettingTab {
 	}
 
 	display(): void {
-		const {containerEl} = this;
+		const { containerEl } = this;
 		containerEl.empty();
 
 		new Setting(containerEl)
@@ -358,5 +413,62 @@ class FatebookSettingTab extends PluginSettingTab {
 						.filter(tag => tag.length > 0);
 					await this.plugin.saveSettings();
 				}));
+	}
+}
+class ResolveModal extends Modal {
+	plugin: FatebookPlugin;
+	questionId: string;
+	editor: Editor;
+	lineNumber: number;
+
+	constructor(app: App, plugin: FatebookPlugin, questionId: string, editor: Editor, lineNumber: number) {
+		super(app);
+		this.plugin = plugin;
+		this.questionId = questionId;
+		this.editor = editor;
+		this.lineNumber = lineNumber;
+	}
+
+	onOpen() {
+		const { contentEl } = this;
+		contentEl.empty();
+		contentEl.createEl('h2', { text: 'Resolve Prediction' });
+
+		const btnContainer = contentEl.createDiv();
+		btnContainer.style.display = 'flex';
+		btnContainer.style.gap = '10px';
+		btnContainer.style.marginTop = '20px';
+
+		['yes', 'no', 'ambiguous'].forEach(res => {
+			const btn = btnContainer.createEl('button', { text: res.toUpperCase() });
+			btn.onclick = async () => {
+				btn.innerText = 'Resolving...';
+				const success = await this.plugin.resolvePrediction(this.questionId, res);
+
+				if (success) {
+					// Grab the current line
+					const currentLine = this.editor.getLine(this.lineNumber);
+
+					// Pick an emoji based on the outcome
+					const icon = res === 'yes' ? '✅' : res === 'no' ? '❌' : '⚖️';
+
+					// Append the resolution status to the end of the line
+					const newLine = `${currentLine} **[${icon} Resolved: ${res.toUpperCase()}]**`;
+
+					// Update the file
+					this.editor.setLine(this.lineNumber, newLine);
+
+					new Notice(`Successfully resolved as ${res.toUpperCase()}`);
+					this.close();
+				} else {
+					new Notice('Failed to resolve prediction via API.');
+					btn.innerText = res.toUpperCase();
+				}
+			};
+		});
+	}
+
+	onClose() {
+		this.contentEl.empty();
 	}
 }
